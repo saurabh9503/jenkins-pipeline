@@ -1,0 +1,272 @@
+cache:
+    paths:
+        - packages/**/node_modules
+        - webapps/**/node_modules
+        - /usr/local/share/ .cache/yarn
+
+stages:
+    - build
+    - security_scanning
+    - deploy
+    - dast
+
+variables:
+    VERSION: "$CI_PIPELINE_IID" #Versioning done through the pipeline IID number
+    
+include:
+    - template: DAST.gitlab-ci.yml # template usedfor dast implementation
+
+######  Altiore-web Client Portal build job ######
+build_job_client:
+    stage: build
+    variables:
+        GIT_STRATEGY: clone
+    tags:
+        - altiore_aw_shell #runner
+    script:   
+        - export NODE_OPTIONS=--max-old-space-size=3072 #increase Node's max heap size
+        - yarn config set network-timeout 300000  #set the time-out of the installation commands in milliseconds
+        - yarn install --frozen-lockfile --network-concurrency 1 # Install dependencies form the project
+        - yarn --version  #Check the version of yarn
+        - cd packages/deploy && chmod 777 * && ./get_env.sh #run the script get_env.sh to get value of deployment_group
+        - source $CI_ENVIRONMENT_FILE.txt
+        - yarn run build  #build command
+        - cd $CI_PROJECT_DIR   # path of the repository
+        - cd webapps/client
+        - echo "Uploading build artifacts to gitlab package registry"
+        - zip -r build.zip build/ # create a zip of build folder
+        - 'curl --request PUT --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file build.zip ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${DEPLOYMENT_GROUP}-client/${VERSION}/' #command for uploading artifacts to gitlab package registry and versioning done by pipeline IID
+    only:
+        changes:
+            - webapps/client/**/*  
+            - "packages/**/**/**/**/*"           # run this job onlywhen changes made in fiels of CLIENT folder
+        refs:
+            - develop 
+            - /^release\//   #run the build job only on develop, master, release or hotfix
+            - /^hotfix\//
+            - master
+    needs:
+        - build_job_relman  #dependency job
+
+
+
+###### Altiore-web RM Portal build job ######
+build_job_relman:
+    stage: build
+    variables:
+        GIT_STRATEGY: clone
+    tags:
+        - altiore_aw_shell #runner
+    script:   
+        - sed -i 's/client/relman/g' packages/deploy/build.js # replace the client to relman in build.js file
+        - sed -i 's/client/relman/g' packages/deploy/get_env.sh # replace the client to relman in get_env.sh file
+        - export NODE_OPTIONS=--max-old-space-size=3072  #increase Node's max heap size
+        - yarn config set network-timeout 300000  #set the time-out of the installation commands in milliseconds
+        - yarn install --frozen-lockfile --network-concurrency 1  # Install dependencies form the project
+        - yarn --version #Check the version of yarn
+        - cd packages/deploy && chmod 777 * && ./get_env.sh #run the script get_env.sh to get value of deployment_group
+        - source $CI_ENVIRONMENT_FILE.txt
+        - yarn run build   #build command
+        - cd $CI_PROJECT_DIR #path of the repository
+        - cd webapps/relman
+        - echo "Uploading build artifacts to gitlab package registry"
+        - zip -r build.zip build/
+        - 'curl --request PUT --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file build.zip ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${DEPLOYMENT_GROUP}-relman/${VERSION}/'   #command for uploading artifacts to gitlab package registry and versioning done by pipeline IID
+    only:
+        changes:
+            - webapps/client/**/*
+            - webapps/relman/**/*  
+            - "packages/**/**/**/**/*"    # run this job onlywhen changes made in CLIENT or RELMAN folder files
+        refs:
+            - develop 
+            - /^release\//  #run the build job only on develop, master, release or hotfix
+            - /^hotfix\//
+            - master
+
+
+######### Security Scanning Jobs ######### 
+
+security_scanning_for_altiore_web:
+    stage: security_scanning
+    trigger:
+        include:
+            - project: 360one/wealth_distribution/altiore/frontend/master_project #scanning job are stored in the master_project.
+              file: '.gitlab-ci.yml' #trigger this yml file to execute the scanning jobs
+   
+
+###### DEV DEPLOYMENT ######
+
+###### Deployment for Client Portal  ######
+dev_deploy_job_client:
+    stage: deploy
+    tags:
+        - altiore_aw_shell  #Runner
+    environment: Dev #Environment value
+    script:
+        - echo "deploying to DEV server"
+        - 'wget --header="JOB-TOKEN: $CI_JOB_TOKEN" ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/dev-client/${VERSION}/build.zip' #Download the zip file from gitlab package registry
+        - mkdir deploy #Create a new deploy directory 
+        - cp build.zip deploy #copy build.zip file to deploy folder
+        - unzip build.zip -d deploy # unzip the build.zip file
+        - sudo scp -r $CI_PROJECT_DIR/deploy/build/* root@$dev_client:/var/www/html   #copy all files from build folder inside /var/www/html 
+    when: manual #Job will trigger manually
+    needs:
+        - build_job_client # require the build_job_client
+    only:
+        changes:
+            - "webapps/client/**/**" 
+            - "packages/**/**/**/**/*" #only chnages in webapps/client
+        refs:
+            - develop   #Reference branch is develop
+
+
+
+###### Deployment job for relman Portal ######
+dev_deploy_job_relman:
+    stage: deploy
+    tags:
+        - altiore_aw_shell  #Runner
+    environment: Dev #Environment value
+    script:
+        - echo "deploying to DEV server"
+        - 'wget --header="JOB-TOKEN: $CI_JOB_TOKEN" ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/dev-relman/${VERSION}/build.zip'  #Download the zip file from gitlab package registry
+        - mkdir deploy   #Create a new deploy directory 
+        - cp build.zip deploy #copy build.zip file to deploy folder
+        - unzip build.zip -d deploy # unzip the build.zip file
+        - sudo scp -r $CI_PROJECT_DIR/deploy/build/* root@$dev_relman:/var/www/html  #copy all files from build folder inside /var/www/html
+    when: manual #Job will trigger manually
+    needs:
+        - build_job_relman # require the build_job_relman
+    only:
+        changes:
+            - "webapps/client/**/**"  #only chnages in webapps/client and webapps/relman
+            - "webapps/relman/**/*"
+            - "packages/**/**/**/**/*"
+        refs:
+            - develop   #Reference branch is develop
+
+
+###### STAGING DEPLOYMENT ######
+
+###### Deployment for Client Portal ######
+staging_deploy_job_client:
+    stage: deploy
+    tags:
+        - altiore_aw_shell
+    environment: Staging
+    script:
+        - echo "deploying to STAGING server"
+        - 'wget --header="JOB-TOKEN: $CI_JOB_TOKEN" ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/staging-client/${VERSION}/build.zip'
+        - mkdir deploy 
+        - cp build.zip deploy
+        - unzip build.zip -d deploy
+        - sudo scp -r $CI_PROJECT_DIR/deploy/build/* root@$staging_client:/var/www/html
+    when: manual
+    needs:
+        - build_job_client
+    only:
+        changes:
+            - "webapps/client/**/**"
+            - "packages/**/**/**/**/*"
+        refs:
+            - /^release\//
+            - /^hotfix\//
+
+
+###### Deployment job for relman Portal ######
+staging_deploy_job_relman:
+    stage: deploy
+    tags:
+        - altiore_aw_shell
+    environment: Staging
+    script:
+        - echo "deploying to STAGING server"
+        - 'wget --header="JOB-TOKEN: $CI_JOB_TOKEN" ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/staging-relman/${VERSION}/build.zip'
+        - mkdir deploy 
+        - cp build.zip deploy
+        - unzip build.zip -d deploy
+        - sudo scp -r $CI_PROJECT_DIR/deploy/build/* root@$staging_relman:/var/www/html  
+    when: manual
+    needs:
+        - build_job_relman
+    only:
+        changes:
+            - "webapps/client/**/**"
+            - "webapps/relman/**/*"
+            - "packages/**/**/**/**/*"
+        refs:
+            - /^release\//
+            - /^hotfix\//
+
+
+###### PRODUCTION DEPLOYMENT ######
+
+###### Deployment for Client Portal  ######
+production_deploy_job_client:
+    stage: deploy
+    tags:
+        - altiore_aw_shell
+    environment: Production
+    script:
+        - echo "deploying to PRODUCTION server"
+        - 'wget --header="JOB-TOKEN: $CI_JOB_TOKEN" ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/production-client/${VERSION}/build.zip'
+        - mkdir deploy 
+        - cp build.zip deploy
+        - unzip build.zip -d deploy
+        - sudo scp -r $CI_PROJECT_DIR/deploy/build/* root@$production_client:/var/www/html   
+    when: manual
+    needs:
+        - build_job_client
+    only:
+        changes:
+            - "webapps/client/**/**"
+            - "packages/**/**/**/**/*"
+        refs:
+            - master
+
+###### Deployment job for relman Portal ######
+production_deploy_job_relman:
+    stage: deploy
+    tags:
+        - altiore_aw_shell
+    environment: Production
+    script:
+        - echo "deploying to PRODUCTION server"
+        - 'wget --header="JOB-TOKEN: $CI_JOB_TOKEN" ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/production-relman/${VERSION}/build.zip'
+        - mkdir deploy 
+        - cp build.zip deploy
+        - unzip build.zip -d deploy
+        - sudo scp -r $CI_PROJECT_DIR/deploy/build/* root@$production_relman:/var/www/html 
+    when: manual
+    needs:
+        - build_job_relman
+    only:
+        changes:
+            - "webapps/client/**/**"
+            - "webapps/relman/**/*"
+            - "packages/**/**/**/**/*"
+        refs:
+            - master
+
+######### DAST SCANNING JOB #########
+dast:   
+    variables: 
+        DAST_WEBSITE: "https://dev-altiore.360.one/,https://dev-altiore-rm.360.one/dashboard" #URL's which are scanned by dast
+    stage: dast
+    tags:
+        - security_docker #Runner
+    artifacts:
+        paths: 
+            - gl-dast-report.json #Artifact file
+    needs:
+        - job: dev_deploy_job_client 
+          optional: true
+        - job: dev_deploy_job_relman
+        
+    rules:
+        - if: $CI_COMMIT_BRANCH == "develop" #Run dast job only for develop branch
+          changes:
+            - "webapps/client/**/**" #Changes made in thid folder only after run a dast job
+            - "webapps/relman/**/**" 
+            - "packages/**/**/**/**/*"
+ 
